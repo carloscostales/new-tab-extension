@@ -140,6 +140,19 @@
 
         <p class="field__hint" id="settings-message" role="alert"></p>
 
+        <div class="field">
+          <span class="field__label">Configuration</span>
+          <input class="field__input field__file field__hidden-input" id="config-import-file" accept="application/json,.json" type="file" />
+          <div class="editor__actions editor__actions--stack">
+            <button class="editor__button editor__button--secondary" id="export-config" type="button">
+              Export configuration
+            </button>
+            <button class="editor__button editor__button--secondary" id="import-config" type="button">
+              Import configuration
+            </button>
+          </div>
+        </div>
+
         <div class="editor__actions editor__actions--stack">
           <button class="editor__button editor__button--secondary" id="clear-image" type="button">
             Remove image

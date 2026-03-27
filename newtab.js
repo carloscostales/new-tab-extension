@@ -36,10 +36,14 @@ const settingsForm = document.getElementById("settings-form");
 const settingsMessage = document.getElementById("settings-message");
 const clearImageButton = document.getElementById("clear-image");
 const backgroundImageFileInput = document.getElementById("background-image-file");
+const configImportFileInput = document.getElementById("config-import-file");
+const exportConfigButton = document.getElementById("export-config");
+const importConfigButton = document.getElementById("import-config");
 const colSelect = document.getElementById("block-col");
 const rowSelect = document.getElementById("block-row");
 const backgroundColorInput = document.getElementById("background-color");
 const backgroundImageUrlInput = document.getElementById("background-image-url");
+const CONFIG_EXPORT_VERSION = 1;
 const addIcon =
   "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32' fill='none'%3E%3Cpath d='M16 7v18M7 16h18' stroke='%23111827' stroke-width='2.5' stroke-linecap='square'/%3E%3C/svg%3E";
 
@@ -245,6 +249,97 @@ function writeFallbackSettings(nextSettings) {
   }
 }
 
+function buildExportPayload() {
+  return {
+    version: CONFIG_EXPORT_VERSION,
+    exportedAt: new Date().toISOString(),
+    links,
+    settings
+  };
+}
+
+function downloadTextFile(filename, contents, mimeType) {
+  const blob = new Blob([contents], { type: mimeType });
+  const objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+
+  link.href = objectUrl;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+
+  window.setTimeout(() => {
+    URL.revokeObjectURL(objectUrl);
+  }, 0);
+}
+
+function sanitizeImportedLinks(value) {
+  if (!Array.isArray(value)) {
+    throw new Error("The file does not include a valid links list.");
+  }
+
+  const seenPositions = new Set();
+
+  return value.map((item) => {
+    const nextLink = normalizeLink(item);
+    let normalizedUrl = String(nextLink.url || "").trim();
+
+    if (!normalizedUrl) {
+      throw new Error("One imported block is missing its URL.");
+    }
+
+    if (!/^https?:\/\//i.test(normalizedUrl)) {
+      normalizedUrl = `https://${normalizedUrl}`;
+    }
+
+    try {
+      normalizedUrl = new URL(normalizedUrl).toString();
+    } catch {
+      throw new Error(`The block "${nextLink.title}" has an invalid URL.`);
+    }
+
+    if (nextLink.row < 1 || nextLink.col < 1) {
+      throw new Error(`The block "${nextLink.title}" has an invalid position.`);
+    }
+
+    const positionKey = `${nextLink.row}:${nextLink.col}`;
+
+    if (seenPositions.has(positionKey)) {
+      throw new Error("The imported file has multiple blocks in the same cell.");
+    }
+
+    seenPositions.add(positionKey);
+
+    return {
+      ...nextLink,
+      url: normalizedUrl
+    };
+  });
+}
+
+function parseImportedConfig(rawValue) {
+  let parsedValue;
+
+  try {
+    parsedValue = JSON.parse(rawValue);
+  } catch {
+    throw new Error("The selected file is not valid JSON.");
+  }
+
+  if (!parsedValue || typeof parsedValue !== "object") {
+    throw new Error("The selected file does not contain a valid configuration.");
+  }
+
+  const importedLinks = sanitizeImportedLinks(parsedValue.links);
+  const importedSettings = normalizeSettings(parsedValue.settings);
+
+  return {
+    links: importedLinks,
+    settings: importedSettings
+  };
+}
+
 function applySettings(nextSettings = settings, previewImage = nextSettings.backgroundImage) {
   document.documentElement.style.setProperty("--page-bg", nextSettings.backgroundColor);
   document.documentElement.style.setProperty("--empty-bg", getDerivedEmptyColor(nextSettings.backgroundColor));
@@ -442,6 +537,7 @@ function openSettings() {
   backgroundImageUrlInput.value = settings.backgroundImage;
   settingsForm.elements.showGridAlways.checked = settings.showGridAlways;
   backgroundImageFileInput.value = "";
+  configImportFileInput.value = "";
   editor.classList.add("is-open");
   editor.setAttribute("aria-hidden", "false");
   applySettings(settings, settings.backgroundImage);
@@ -822,6 +918,56 @@ async function handleClearImage() {
   settingsMessage.textContent = "Image removed.";
 }
 
+function handleExportConfig() {
+  const payload = buildExportPayload();
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+
+  downloadTextFile(
+    `new-tab-blocks-config-${timestamp}.json`,
+    JSON.stringify(payload, null, 2),
+    "application/json"
+  );
+  settingsMessage.textContent = "Configuration exported.";
+}
+
+async function handleImportConfigFile(event) {
+  const file = event.target.files?.[0] || null;
+
+  if (!file) {
+    return;
+  }
+
+  settingsMessage.textContent = "";
+
+  try {
+    const rawValue = await file.text();
+    const importedConfig = parseImportedConfig(rawValue);
+
+    links = importedConfig.links;
+    settings = importedConfig.settings;
+    previewBackgroundImage = "";
+
+    await saveLinks();
+    await saveSettings();
+
+    applySettings();
+    updateGridDimensions();
+    renderBlocks();
+
+    backgroundColorInput.value = settings.backgroundColor;
+    backgroundImageUrlInput.value = settings.backgroundImage;
+    settingsForm.elements.showGridAlways.checked = settings.showGridAlways;
+    backgroundImageFileInput.value = "";
+    settingsMessage.textContent = "Configuration imported.";
+  } catch (error) {
+    settingsMessage.textContent = error instanceof Error
+      ? error.message
+      : "The configuration could not be imported.";
+  } finally {
+    configImportFileInput.value = "";
+  }
+}
+
 function updateBackgroundPreview() {
   const previewSettings = normalizeSettings({
     ...settings,
@@ -886,6 +1032,9 @@ editorCancel.addEventListener("click", closeEditor);
 editorForm.addEventListener("submit", handleSubmit);
 settingsForm.addEventListener("submit", handleSettingsSubmit);
 clearImageButton.addEventListener("click", handleClearImage);
+exportConfigButton.addEventListener("click", handleExportConfig);
+importConfigButton.addEventListener("click", () => configImportFileInput.click());
+configImportFileInput.addEventListener("change", handleImportConfigFile);
 colSelect.addEventListener("change", handlePositionChange);
 rowSelect.addEventListener("change", handlePositionChange);
 editorForm.elements.title.addEventListener("input", handleBlockPreviewChange);

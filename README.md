@@ -9,6 +9,7 @@ A Chrome extension that replaces the default new tab page with a customizable gr
 - Choose each block's name, URL, color, icon visibility, and title visibility.
 - Drag and drop blocks to move them across the grid.
 - Customize the background with a solid color or image.
+- Import and export complete configurations as JSON files.
 - Save blocks and settings with `chrome.storage.local`.
 
 ## Tech Stack
