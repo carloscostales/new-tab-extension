@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "New Tab Blocks",
+  "version": "0.1.0",
+  "description": "Custom new tab page with clickable link blocks.",
+  "permissions": ["storage"],
+  "chrome_url_overrides": {
+    "newtab": "newtab.html"
+  }
+}

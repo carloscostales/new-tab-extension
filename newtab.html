@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>New Tab Blocks</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="page">
+      <div class="page-menu" id="page-menu">
+        <div class="page-menu__edge" aria-hidden="true"></div>
+        <div class="page-menu__panel" id="page-menu-panel" aria-hidden="true">
+          <button class="page-menu__item" id="edit-toggle" type="button" aria-pressed="false" aria-label="Toggle edit mode">
+            E
+          </button>
+          <button class="page-menu__item" id="options-toggle" type="button" aria-label="Open options">
+            O
+          </button>
+        </div>
+      </div>
+      <section class="blocks" id="blocks"></section>
+    </main>
+
+    <template id="block-template">
+      <article class="block-wrapper">
+        <a class="block" target="_self" rel="noreferrer">
+          <img class="block__icon" alt="" />
+          <span class="block__title"></span>
+        </a>
+        <div class="block-actions">
+          <button class="block-action block-action--danger" data-action="delete" type="button" aria-label="Delete block">
+            x
+          </button>
+        </div>
+      </article>
+    </template>
+
+    <template id="add-block-template">
+      <button class="block block--add" id="add-block" type="button">
+        <img class="block__icon" alt="" />
+        <!-- <span class="block__title">Add block</span> -->
+      </button>
+    </template>
+
+    <aside class="editor" id="editor" aria-hidden="true">
+      <div class="editor__header">
+        <div>
+          <p class="editor__eyebrow" id="editor-eyebrow">Block Editor</p>
+          <h2 class="editor__title" id="editor-title">New block</h2>
+        </div>
+        <button class="editor__close" id="editor-close" type="button" aria-label="Close editor">
+          x
+        </button>
+      </div>
+
+      <form class="editor__form" id="editor-form">
+        <input id="block-id" name="id" type="hidden" />
+
+        <label class="field">
+          <span class="field__label">Name</span>
+          <input class="field__input" id="block-title" name="title" maxlength="40" required type="text" />
+        </label>
+
+        <label class="field">
+          <span class="field__label">URL</span>
+          <input
+            class="field__input"
+            id="block-url"
+            name="url"
+            placeholder="https://example.com"
+            required
+            type="text"
+          />
+        </label>
+
+        <label class="field">
+          <span class="field__label">Color</span>
+          <input class="field__color" id="block-color" name="color" required type="color" />
+        </label>
+
+        <label class="field field--checkbox">
+          <input id="block-show-title" name="showTitle" type="checkbox" />
+          <span class="field__label">Show name</span>
+        </label>
+
+        <label class="field field--checkbox">
+          <input id="block-show-icon" name="showIcon" type="checkbox" />
+          <span class="field__label">Show favicon</span>
+        </label>
+
+        <div class="field field--split field--hidden">
+          <label class="field">
+            <span class="field__label">Column</span>
+            <select class="field__input" id="block-col" name="col" required></select>
+          </label>
+
+          <label class="field">
+            <span class="field__label">Row</span>
+            <select class="field__input" id="block-row" name="row" required></select>
+          </label>
+        </div>
+
+        <p class="field__hint" id="editor-error" role="alert"></p>
+
+        <div class="editor__actions">
+          <button class="editor__button editor__button--secondary" id="editor-cancel" type="button">
+            Cancel
+          </button>
+          <button class="editor__button editor__button--primary" type="submit">Save</button>
+        </div>
+      </form>
+
+      <form class="editor__form editor__form--hidden" id="settings-form">
+        <label class="field">
+          <span class="field__label">Background color</span>
+          <input class="field__color" id="background-color" name="backgroundColor" type="color" />
+        </label>
+
+        <label class="field field--checkbox">
+          <input id="show-grid-always" name="showGridAlways" type="checkbox" />
+          <span class="field__label">Show empty grid all the time</span>
+        </label>
+
+        <label class="field">
+          <span class="field__label">Image URL</span>
+          <input
+            class="field__input"
+            id="background-image-url"
+            name="backgroundImage"
+            placeholder="https://example.com/image.jpg"
+            type="url"
+          />
+        </label>
+
+        <label class="field">
+          <span class="field__label">Or choose a local image</span>
+          <input class="field__input field__file" id="background-image-file" accept="image/*" type="file" />
+        </label>
+
+        <p class="field__hint" id="settings-message" role="alert"></p>
+
+        <div class="editor__actions editor__actions--stack">
+          <button class="editor__button editor__button--secondary" id="clear-image" type="button">
+            Remove image
+          </button>
+          <button class="editor__button editor__button--primary" type="submit">Save background</button>
+        </div>
+      </form>
+    </aside>
+
+    <script src="newtab.js"></script>
+  </body>
+</html>
