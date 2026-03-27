@@ -23,9 +23,12 @@ A Chrome extension that replaces the default new tab page with a customizable gr
 
 ```text
 .
+├── constants.js
 ├── manifest.json
 ├── newtab.html
 ├── newtab.js
+├── storage.js
+├── utils.js
 └── styles.css
 ```
 
@@ -41,7 +44,10 @@ A Chrome extension that replaces the default new tab page with a customizable gr
 
 - `manifest.json` registers the extension and overrides the default new tab page.
 - `newtab.html` contains the page structure and editor UI.
-- `newtab.js` handles rendering, editing, drag and drop, persistence, and background settings.
+- `constants.js` centralizes default data and shared configuration.
+- `storage.js` handles persistence plus import/export.
+- `utils.js` contains reusable normalization and UI helpers.
+- `newtab.js` handles rendering, editing, drag and drop, and wires the modules together.
 - `styles.css` defines the layout, grid, and visual design.
 
 ## Current Status

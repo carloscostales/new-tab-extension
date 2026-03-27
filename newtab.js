@@ -1,22 +1,20 @@
-const defaultLinks = [
-  { title: "Gmail", url: "https://mail.google.com/", color: "#ea4335", col: 1, row: 1, showTitle: true, showIcon: true },
-  { title: "YouTube", url: "https://www.youtube.com/", color: "#ff0000", col: 2, row: 1, showTitle: true, showIcon: true },
-  { title: "GitHub", url: "https://github.com/", color: "#24292f", col: 3, row: 1, showTitle: true, showIcon: true },
-  { title: "ChatGPT", url: "https://chatgpt.com/", color: "#10a37f", col: 4, row: 1, showTitle: true, showIcon: true },
-  { title: "Calendar", url: "https://calendar.google.com/", color: "#4285f4", col: 5, row: 1, showTitle: true, showIcon: true },
-  { title: "Drive", url: "https://drive.google.com/", color: "#0f9d58", col: 6, row: 1, showTitle: true, showIcon: true }
-];
-
-const STORAGE_KEY = "new-tab-blocks";
-const SETTINGS_STORAGE_KEY = "new-tab-settings";
-const FALLBACK_STORAGE_KEY = "new-tab-blocks-fallback";
-const FALLBACK_SETTINGS_KEY = "new-tab-settings-fallback";
-const PAGE_TOP_OFFSET = 52;
-const defaultSettings = {
-  backgroundColor: "#eef1f4",
-  backgroundImage: "",
-  showGridAlways: true
-};
+import { PAGE_TOP_OFFSET, addIcon, defaultLinks, defaultSettings } from "./constants.js";
+import {
+  buildExportPayload,
+  parseImportedConfig,
+  readStoredLinks,
+  readStoredSettings,
+  saveLinks,
+  saveSettings
+} from "./storage.js";
+import {
+  getDerivedEmptyColor,
+  getHostname,
+  getTextColor,
+  normalizeLink,
+  normalizeSettings,
+  readFileAsDataUrl
+} from "./utils.js";
 
 const blocksContainer = document.getElementById("blocks");
 const blockTemplate = document.getElementById("block-template");
@@ -43,9 +41,6 @@ const colSelect = document.getElementById("block-col");
 const rowSelect = document.getElementById("block-row");
 const backgroundColorInput = document.getElementById("background-color");
 const backgroundImageUrlInput = document.getElementById("background-image-url");
-const CONFIG_EXPORT_VERSION = 1;
-const addIcon =
-  "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32' fill='none'%3E%3Cpath d='M16 7v18M7 16h18' stroke='%23111827' stroke-width='2.5' stroke-linecap='square'/%3E%3C/svg%3E";
 
 let links = [];
 let isEditing = false;
@@ -57,45 +52,6 @@ let draggedLinkId = "";
 let highlightedDropCell = null;
 let highlightedEditorCell = null;
 let previewBackgroundImage = "";
-
-function createId() {
-  return crypto.randomUUID();
-}
-
-function getHostname(url) {
-  try {
-    return new URL(url).hostname;
-  } catch {
-    return "";
-  }
-}
-
-function normalizeLink(link) {
-  return {
-    id: link.id || createId(),
-    title: link.title || "Untitled",
-    url: link.url || "",
-    color: link.color || "#4b5563",
-    col: Number.parseInt(link.col, 10) || 1,
-    row: Number.parseInt(link.row, 10) || 1,
-    showTitle: typeof link.showTitle === "boolean" ? link.showTitle : true,
-    showIcon: typeof link.showIcon === "boolean" ? link.showIcon : true
-  };
-}
-
-function normalizeSettings(value) {
-  const backgroundColor = typeof value?.backgroundColor === "string" && /^#[0-9a-f]{6}$/i.test(value.backgroundColor)
-    ? value.backgroundColor
-    : defaultSettings.backgroundColor;
-  const backgroundImage = typeof value?.backgroundImage === "string"
-    ? value.backgroundImage.trim()
-    : defaultSettings.backgroundImage;
-  const showGridAlways = typeof value?.showGridAlways === "boolean"
-    ? value.showGridAlways
-    : defaultSettings.showGridAlways;
-
-  return { backgroundColor, backgroundImage, showGridAlways };
-}
 
 function getGridMetrics() {
   const styles = getComputedStyle(document.documentElement);
@@ -127,137 +83,6 @@ function updateGridDimensions() {
   blocksContainer.style.setProperty("--grid-rows", String(gridRows));
 }
 
-function readStoredLinks() {
-  return new Promise((resolve) => {
-    if (!chrome?.storage?.local) {
-      resolve(readFallbackLinks());
-      return;
-    }
-
-    chrome.storage.local.get([STORAGE_KEY], (result) => {
-      if (chrome.runtime.lastError) {
-        resolve(readFallbackLinks());
-        return;
-      }
-
-      const storedLinks = Array.isArray(result[STORAGE_KEY]) ? result[STORAGE_KEY] : null;
-      resolve(storedLinks ?? readFallbackLinks());
-    });
-  });
-}
-
-function readStoredSettings() {
-  return new Promise((resolve) => {
-    if (!chrome?.storage?.local) {
-      resolve(readFallbackSettings());
-      return;
-    }
-
-    chrome.storage.local.get([SETTINGS_STORAGE_KEY], (result) => {
-      if (chrome.runtime.lastError) {
-        resolve(readFallbackSettings());
-        return;
-      }
-
-      const storedSettings = result[SETTINGS_STORAGE_KEY];
-      resolve(storedSettings ?? readFallbackSettings());
-    });
-  });
-}
-
-function saveLinks() {
-  return new Promise((resolve) => {
-    writeFallbackLinks(links);
-
-    if (!chrome?.storage?.local) {
-      resolve();
-      return;
-    }
-
-    chrome.storage.local.set({ [STORAGE_KEY]: links }, () => {
-      if (chrome.runtime.lastError) {
-        console.warn("Failed to save links to chrome.storage.local:", chrome.runtime.lastError.message);
-      }
-
-      resolve();
-    });
-  });
-}
-
-function saveSettings() {
-  return new Promise((resolve) => {
-    writeFallbackSettings(settings);
-
-    if (!chrome?.storage?.local) {
-      resolve();
-      return;
-    }
-
-    chrome.storage.local.set({ [SETTINGS_STORAGE_KEY]: settings }, () => {
-      if (chrome.runtime.lastError) {
-        console.warn("Failed to save settings to chrome.storage.local:", chrome.runtime.lastError.message);
-      }
-
-      resolve();
-    });
-  });
-}
-
-function readFallbackLinks() {
-  try {
-    const rawValue = localStorage.getItem(FALLBACK_STORAGE_KEY);
-
-    if (!rawValue) {
-      return null;
-    }
-
-    const parsedValue = JSON.parse(rawValue);
-    return Array.isArray(parsedValue) ? parsedValue : null;
-  } catch {
-    return null;
-  }
-}
-
-function writeFallbackLinks(nextLinks) {
-  try {
-    localStorage.setItem(FALLBACK_STORAGE_KEY, JSON.stringify(nextLinks));
-  } catch {
-    // Ignore fallback storage failures.
-  }
-}
-
-function readFallbackSettings() {
-  try {
-    const rawValue = localStorage.getItem(FALLBACK_SETTINGS_KEY);
-
-    if (!rawValue) {
-      return null;
-    }
-
-    const parsedValue = JSON.parse(rawValue);
-    return parsedValue && typeof parsedValue === "object" ? parsedValue : null;
-  } catch {
-    return null;
-  }
-}
-
-function writeFallbackSettings(nextSettings) {
-  try {
-    localStorage.setItem(FALLBACK_SETTINGS_KEY, JSON.stringify(nextSettings));
-  } catch {
-    // Ignore fallback storage failures.
-  }
-}
-
-function buildExportPayload() {
-  return {
-    version: CONFIG_EXPORT_VERSION,
-    exportedAt: new Date().toISOString(),
-    links,
-    settings
-  };
-}
-
 function downloadTextFile(filename, contents, mimeType) {
   const blob = new Blob([contents], { type: mimeType });
   const objectUrl = URL.createObjectURL(blob);
@@ -272,72 +97,6 @@ function downloadTextFile(filename, contents, mimeType) {
   window.setTimeout(() => {
     URL.revokeObjectURL(objectUrl);
   }, 0);
-}
-
-function sanitizeImportedLinks(value) {
-  if (!Array.isArray(value)) {
-    throw new Error("The file does not include a valid links list.");
-  }
-
-  const seenPositions = new Set();
-
-  return value.map((item) => {
-    const nextLink = normalizeLink(item);
-    let normalizedUrl = String(nextLink.url || "").trim();
-
-    if (!normalizedUrl) {
-      throw new Error("One imported block is missing its URL.");
-    }
-
-    if (!/^https?:\/\//i.test(normalizedUrl)) {
-      normalizedUrl = `https://${normalizedUrl}`;
-    }
-
-    try {
-      normalizedUrl = new URL(normalizedUrl).toString();
-    } catch {
-      throw new Error(`The block "${nextLink.title}" has an invalid URL.`);
-    }
-
-    if (nextLink.row < 1 || nextLink.col < 1) {
-      throw new Error(`The block "${nextLink.title}" has an invalid position.`);
-    }
-
-    const positionKey = `${nextLink.row}:${nextLink.col}`;
-
-    if (seenPositions.has(positionKey)) {
-      throw new Error("The imported file has multiple blocks in the same cell.");
-    }
-
-    seenPositions.add(positionKey);
-
-    return {
-      ...nextLink,
-      url: normalizedUrl
-    };
-  });
-}
-
-function parseImportedConfig(rawValue) {
-  let parsedValue;
-
-  try {
-    parsedValue = JSON.parse(rawValue);
-  } catch {
-    throw new Error("The selected file is not valid JSON.");
-  }
-
-  if (!parsedValue || typeof parsedValue !== "object") {
-    throw new Error("The selected file does not contain a valid configuration.");
-  }
-
-  const importedLinks = sanitizeImportedLinks(parsedValue.links);
-  const importedSettings = normalizeSettings(parsedValue.settings);
-
-  return {
-    links: importedLinks,
-    settings: importedSettings
-  };
 }
 
 function applySettings(nextSettings = settings, previewImage = nextSettings.backgroundImage) {
@@ -358,51 +117,6 @@ function applySettings(nextSettings = settings, previewImage = nextSettings.back
     document.body.style.backgroundSize = "";
     document.body.style.backgroundAttachment = "";
   }
-}
-
-function mixChannel(channelA, channelB, amount) {
-  return Math.round(channelA + (channelB - channelA) * amount);
-}
-
-function hexToRgb(color) {
-  const normalized = color.replace("#", "");
-  const red = Number.parseInt(normalized.slice(0, 2), 16);
-  const green = Number.parseInt(normalized.slice(2, 4), 16);
-  const blue = Number.parseInt(normalized.slice(4, 6), 16);
-
-  return { red, green, blue };
-}
-
-function rgbToHex(red, green, blue) {
-  return `#${[red, green, blue]
-    .map((value) => value.toString(16).padStart(2, "0"))
-    .join("")}`;
-}
-
-function getDerivedEmptyColor(backgroundColor) {
-  const { red, green, blue } = hexToRgb(backgroundColor);
-  const brightness = (red * 299 + green * 587 + blue * 114) / 1000;
-  const target = brightness > 160 ? 210 : 255;
-  const amount = brightness > 160 ? 0.14 : 0.18;
-
-  return rgbToHex(
-    mixChannel(red, target, amount),
-    mixChannel(green, target, amount),
-    mixChannel(blue, target, amount)
-  );
-}
-
-function getTextColor(backgroundColor) {
-  const color = backgroundColor.replace("#", "");
-  const normalized = color.length === 3
-    ? color.split("").map((value) => `${value}${value}`).join("")
-    : color;
-  const red = Number.parseInt(normalized.slice(0, 2), 16);
-  const green = Number.parseInt(normalized.slice(2, 4), 16);
-  const blue = Number.parseInt(normalized.slice(4, 6), 16);
-  const brightness = (red * 299 + green * 587 + blue * 114) / 1000;
-
-  return brightness > 160 ? "#111827" : "#ffffff";
 }
 
 function isCellTaken(row, col, ignoredId = "") {
@@ -586,7 +300,7 @@ function createBlockNode(link) {
     event.preventDefault();
     event.stopPropagation();
     links = links.filter((item) => item.id !== link.id);
-    await saveLinks();
+    await saveLinks(links);
     renderBlocks();
   });
 
@@ -788,7 +502,7 @@ async function moveDraggedLinkToCell(cell) {
     return link;
   });
 
-  await saveLinks();
+  await saveLinks(links);
   renderBlocks();
 }
 
@@ -850,19 +564,9 @@ async function handleSubmit(event) {
     links = [...links, nextLink];
   }
 
-  await saveLinks();
+  await saveLinks(links);
   closeEditor();
   renderBlocks();
-}
-
-function readFileAsDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-
-    reader.addEventListener("load", () => resolve(String(reader.result || "")));
-    reader.addEventListener("error", () => reject(new Error("Unable to read the selected image.")));
-    reader.readAsDataURL(file);
-  });
 }
 
 async function handleSettingsSubmit(event) {
@@ -899,7 +603,7 @@ async function handleSettingsSubmit(event) {
 
   settings = normalizeSettings({ backgroundColor, backgroundImage, showGridAlways });
   previewBackgroundImage = "";
-  await saveSettings();
+  await saveSettings(settings);
   applySettings();
   renderBlocks();
   backgroundImageUrlInput.value = settings.backgroundImage;
@@ -910,7 +614,7 @@ async function handleSettingsSubmit(event) {
 async function handleClearImage() {
   settings = normalizeSettings({ ...settings, backgroundImage: "" });
   previewBackgroundImage = "";
-  await saveSettings();
+  await saveSettings(settings);
   applySettings();
   renderBlocks();
   backgroundImageUrlInput.value = "";
@@ -919,7 +623,7 @@ async function handleClearImage() {
 }
 
 function handleExportConfig() {
-  const payload = buildExportPayload();
+  const payload = buildExportPayload(links, settings);
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
 
   downloadTextFile(
@@ -947,8 +651,8 @@ async function handleImportConfigFile(event) {
     settings = importedConfig.settings;
     previewBackgroundImage = "";
 
-    await saveLinks();
-    await saveSettings();
+    await saveLinks(links);
+    await saveSettings(settings);
 
     applySettings();
     updateGridDimensions();
@@ -1010,11 +714,11 @@ async function initialize() {
   updateGridDimensions();
 
   if (!Array.isArray(storedLinks)) {
-    await saveLinks();
+    await saveLinks(links);
   }
 
   if (!storedSettings || typeof storedSettings !== "object") {
-    await saveSettings();
+    await saveSettings(settings);
   }
 
   renderBlocks();
