@@ -56,4 +56,4 @@ This project is currently at version `0.1.0` and includes editable shortcut bloc
 
 ## License
 
-Add the license you want for the project here, for example `MIT`.
+This project is licensed under the MIT License. See the `LICENSE` file for details.
