@@ -1,795 +1,653 @@
-import { PAGE_TOP_OFFSET, addIcon, defaultLinks, defaultSettings } from "./constants.js";
-import {
-  buildExportPayload,
-  parseImportedConfig,
-  readStoredLinks,
-  readStoredSettings,
-  saveLinks,
-  saveSettings
-} from "./storage.js";
-import {
-  getDerivedEmptyColor,
-  getHostname,
-  getTextColor,
-  normalizeLink,
-  normalizeSettings,
-  readFileAsDataUrl
-} from "./utils.js";
-
-const blocksContainer = document.getElementById("blocks");
-const blockTemplate = document.getElementById("block-template");
-const addBlockTemplate = document.getElementById("add-block-template");
-const pageMenu = document.getElementById("page-menu");
-const pageMenuPanel = document.getElementById("page-menu-panel");
-const editToggle = document.getElementById("edit-toggle");
-const optionsToggle = document.getElementById("options-toggle");
-const editor = document.getElementById("editor");
-const editorEyebrow = document.getElementById("editor-eyebrow");
-const editorTitle = document.getElementById("editor-title");
-const editorClose = document.getElementById("editor-close");
-const editorCancel = document.getElementById("editor-cancel");
-const editorForm = document.getElementById("editor-form");
-const editorError = document.getElementById("editor-error");
-const settingsForm = document.getElementById("settings-form");
-const settingsMessage = document.getElementById("settings-message");
-const clearImageButton = document.getElementById("clear-image");
-const backgroundImageFileInput = document.getElementById("background-image-file");
-const configImportFileInput = document.getElementById("config-import-file");
-const exportConfigButton = document.getElementById("export-config");
-const importConfigButton = document.getElementById("import-config");
-const colSelect = document.getElementById("block-col");
-const rowSelect = document.getElementById("block-row");
-const backgroundColorInput = document.getElementById("background-color");
-const backgroundImageUrlInput = document.getElementById("background-image-url");
-
-let links = [];
-let isEditing = false;
-let gridColumns = 1;
-let gridRows = 1;
-let activePanel = "blocks";
-let settings = { ...defaultSettings };
-let draggedLinkId = "";
-let highlightedDropCell = null;
-let highlightedEditorCell = null;
-let previewBackgroundImage = "";
-
-function getGridMetrics() {
-  const styles = getComputedStyle(document.documentElement);
-  const tileSize = Number.parseFloat(styles.getPropertyValue("--tile-size")) || 120;
-  const gap = Number.parseFloat(styles.getPropertyValue("--gap")) || 12;
-
-  return { tileSize, gap };
+import { defaults, LIMITS } from "./constants.js";
+import { validate, move, parseImport, exportConfig } from "./model.js";
+import { store, subscribe } from "./storage.js";
+import { textColor, compressImage } from "./utils.js";
+const getElement = (id) => document.getElementById(id);
+const form = getElement("form");
+const fields = form.elements;
+const grid = getElement("blocks");
+const dialog = getElement("editor");
+let current = { revision: 0, config: defaults() };
+let draft = null;
+let mode = "";
+let activeId = "";
+let editing = false;
+let opener = null;
+let dragId = "";
+let busy = false;
+let imageToken = 0;
+let imagePending = false;
+let openerId = "";
+let openerPosition = null;
+let imported = false;
+let loadFailed = false;
+const cells = new Map();
+let statusTimer;
+function announce(message) {
+  clearTimeout(statusTimer);
+  getElement("status").textContent = message;
+  statusTimer = setTimeout(() => {
+    getElement("status").textContent = "";
+  }, 5000);
 }
-
-function getMaxOccupiedColumn() {
-  return links.reduce((max, link) => Math.max(max, link.col), 1);
+function showError(e) {
+  getElement("error").textContent = e.message;
 }
-
-function getMaxOccupiedRow() {
-  return links.reduce((max, link) => Math.max(max, link.row), 1);
-}
-
-function updateGridDimensions() {
-  const { tileSize, gap } = getGridMetrics();
-  const availableWidth = Math.max(window.innerWidth - gap * 2, tileSize);
-  const availableHeight = Math.max(window.innerHeight - PAGE_TOP_OFFSET - gap * 2, tileSize);
-  const visibleColumns = Math.max(1, Math.floor((availableWidth + gap) / (tileSize + gap)));
-  const visibleRows = Math.max(1, Math.floor((availableHeight + gap) / (tileSize + gap)));
-
-  gridColumns = Math.max(visibleColumns, getMaxOccupiedColumn(), 1);
-  gridRows = Math.max(visibleRows, getMaxOccupiedRow(), 1);
-
-  blocksContainer.style.setProperty("--grid-columns", String(gridColumns));
-  blocksContainer.style.setProperty("--grid-rows", String(gridRows));
-}
-
-function downloadTextFile(filename, contents, mimeType) {
-  const blob = new Blob([contents], { type: mimeType });
-  const objectUrl = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-
-  link.href = objectUrl;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-
-  window.setTimeout(() => {
-    URL.revokeObjectURL(objectUrl);
-  }, 0);
-}
-
-function applySettings(nextSettings = settings, previewImage = nextSettings.backgroundImage) {
-  document.documentElement.style.setProperty("--page-bg", nextSettings.backgroundColor);
-  document.documentElement.style.setProperty("--empty-bg", getDerivedEmptyColor(nextSettings.backgroundColor));
-  document.body.style.backgroundColor = nextSettings.backgroundColor;
-
-  if (previewImage) {
-    document.body.style.backgroundImage = `linear-gradient(rgba(255, 255, 255, 0.2), rgba(255, 255, 255, 0.2)), url("${previewImage.replace(/"/g, '\\"')}")`;
-    document.body.style.backgroundPosition = "center";
-    document.body.style.backgroundRepeat = "no-repeat";
-    document.body.style.backgroundSize = "cover";
-    document.body.style.backgroundAttachment = "fixed";
-  } else {
-    document.body.style.backgroundImage = "";
-    document.body.style.backgroundPosition = "";
-    document.body.style.backgroundRepeat = "";
-    document.body.style.backgroundSize = "";
-    document.body.style.backgroundAttachment = "";
-  }
-}
-
-function isCellTaken(row, col, ignoredId = "") {
-  return links.some((link) => link.row === row && link.col === col && link.id !== ignoredId);
-}
-
-function fillPositionOptions(selectedCol = 1, selectedRow = 1, ignoredId = "") {
-  colSelect.replaceChildren();
-  rowSelect.replaceChildren();
-
-  for (let col = 1; col <= gridColumns; col += 1) {
-    const option = document.createElement("option");
-    option.value = String(col);
-    option.textContent = String(col);
-    option.selected = col === selectedCol;
-    colSelect.appendChild(option);
-  }
-
-  for (let row = 1; row <= gridRows; row += 1) {
-    const option = document.createElement("option");
-    option.value = String(row);
-    option.textContent = String(row);
-    option.selected = row === selectedRow;
-    rowSelect.appendChild(option);
-  }
-
-  editorError.textContent = isCellTaken(selectedRow, selectedCol, ignoredId)
-    ? "That cell is already occupied."
-    : "";
-}
-
-function closeEditor() {
-  editor.classList.remove("is-open");
-  editor.setAttribute("aria-hidden", "true");
-  editorError.textContent = "";
-  settingsMessage.textContent = "";
-  highlightedEditorCell = null;
-  previewBackgroundImage = "";
-  applySettings();
-  renderBlocks();
-}
-
-function clearDragState() {
-  if (highlightedDropCell) {
-    highlightedDropCell.classList.remove("cell--drop-target");
-    highlightedDropCell = null;
-  }
-
-  draggedLinkId = "";
-  document.body.classList.remove("is-dragging");
-}
-
-function setMenuOpen(nextValue) {
-  pageMenu.classList.toggle("is-open", nextValue);
-  pageMenuPanel.setAttribute("aria-hidden", String(!nextValue));
-}
-
-function setEditing(nextValue) {
-  isEditing = nextValue;
-  document.body.classList.toggle("is-editing", isEditing);
-  editToggle.textContent = isEditing ? "Done" : "Edit";
-  editToggle.setAttribute("aria-pressed", String(isEditing));
-
-  if (!isEditing) {
-    clearDragState();
-    closeEditor();
-  }
-}
-
-function setActivePanel(panel) {
-  activePanel = panel;
-  const isSettingsPanel = panel === "settings";
-
-  editorEyebrow.textContent = isSettingsPanel ? "General Options" : "Block Editor";
-  editorTitle.textContent = isSettingsPanel ? "Background" : "New block";
-  editorForm.classList.toggle("editor__form--hidden", isSettingsPanel);
-  settingsForm.classList.toggle("editor__form--hidden", !isSettingsPanel);
-}
-
-function setHighlightedEditorCell(position) {
-  if (!position) {
-    highlightedEditorCell = null;
-    return;
-  }
-
-  highlightedEditorCell = {
-    row: position.row,
-    col: position.col
-  };
-}
-
-function openEditor(link, position = null) {
-  setActivePanel("blocks");
-  editorForm.reset();
-  editorError.textContent = "";
-
-  if (link) {
-    editorTitle.textContent = "Edit block";
-    editorForm.elements.id.value = link.id;
-    editorForm.elements.title.value = link.title;
-    editorForm.elements.url.value = link.url;
-    editorForm.elements.color.value = link.color;
-    editorForm.elements.showTitle.checked = link.showTitle;
-    editorForm.elements.showIcon.checked = link.showIcon;
-    fillPositionOptions(link.col, link.row, link.id);
-    setHighlightedEditorCell({ row: link.row, col: link.col });
-  } else {
-    editorTitle.textContent = "New block";
-    editorForm.elements.id.value = "";
-    editorForm.elements.color.value = "#4f46e5";
-    editorForm.elements.showTitle.checked = true;
-    editorForm.elements.showIcon.checked = true;
-    fillPositionOptions(position?.col || 1, position?.row || 1);
-    setHighlightedEditorCell({
-      row: position?.row || 1,
-      col: position?.col || 1
-    });
-  }
-
-  editor.classList.add("is-open");
-  editor.setAttribute("aria-hidden", "false");
-  renderBlocks();
-  editorForm.elements.title.focus();
-}
-
-function openSettings() {
-  setMenuOpen(false);
-  setActivePanel("settings");
-  setHighlightedEditorCell(null);
-  settingsMessage.textContent = "";
-  backgroundColorInput.value = settings.backgroundColor;
-  backgroundImageUrlInput.value = settings.backgroundImage;
-  settingsForm.elements.showGridAlways.checked = settings.showGridAlways;
-  backgroundImageFileInput.value = "";
-  configImportFileInput.value = "";
-  editor.classList.add("is-open");
-  editor.setAttribute("aria-hidden", "false");
-  applySettings(settings, settings.backgroundImage);
-  renderBlocks();
-  backgroundColorInput.focus();
-}
-
-function getLinkAtPosition(row, col) {
-  return links.find((link) => link.row === row && link.col === col) || null;
-}
-
-function createBlockNode(link) {
-  const blockNode = blockTemplate.content.cloneNode(true);
-  const wrapper = blockNode.querySelector(".block-wrapper");
-  const anchor = blockNode.querySelector(".block");
-  const icon = blockNode.querySelector(".block__icon");
-  const title = blockNode.querySelector(".block__title");
-  const deleteButton = blockNode.querySelector('[data-action="delete"]');
-  const hostname = getHostname(link.url);
-  const isPreviewLink = link.id === "preview-link";
-
-  wrapper.dataset.id = link.id;
-  wrapper.draggable = isEditing && !isPreviewLink;
-  anchor.href = isPreviewLink ? "#" : link.url;
-  anchor.style.backgroundColor = link.color;
-  anchor.style.color = getTextColor(link.color);
-  anchor.setAttribute("aria-label", link.title);
-  anchor.addEventListener("click", (event) => {
-    if (isEditing) {
-      event.preventDefault();
-      if (!isPreviewLink) {
-        openEditor(link);
-      }
-    }
-  });
-  icon.src = hostname
-    ? `https://www.google.com/s2/favicons?domain=${hostname}&sz=64`
-    : "";
-  icon.alt = "";
-  icon.hidden = !link.showIcon;
-  title.textContent = link.title;
-  title.hidden = !link.showTitle;
-  deleteButton.hidden = isPreviewLink;
-
-  deleteButton.addEventListener("click", async (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    links = links.filter((item) => item.id !== link.id);
-    await saveLinks(links);
-    renderBlocks();
-  });
-
-  wrapper.addEventListener("dragstart", (event) => {
-    if (!isEditing) {
-      event.preventDefault();
-      return;
-    }
-
-    draggedLinkId = link.id;
-    document.body.classList.add("is-dragging");
-    wrapper.classList.add("block-wrapper--dragging");
-    if (event.dataTransfer) {
-      event.dataTransfer.effectAllowed = "move";
-      event.dataTransfer.setData("text/plain", link.id);
-    }
-  });
-
-  wrapper.addEventListener("dragend", () => {
-    wrapper.classList.remove("block-wrapper--dragging");
-    clearDragState();
-  });
-
-  return blockNode;
-}
-
-function createAddBlockNode(position) {
-  const addNode = addBlockTemplate.content.cloneNode(true);
-  const button = addNode.querySelector("#add-block");
-  const icon = addNode.querySelector(".block__icon");
-
-  icon.src = addIcon;
-  button.addEventListener("click", () => openEditor(null, position));
-
-  return addNode;
-}
-
-function createEmptyCellNode() {
-  const button = document.createElement("button");
-
-  button.type = "button";
-  button.className = "block block--empty";
-  button.setAttribute("aria-hidden", "true");
-  button.tabIndex = -1;
-
-  return button;
-}
-
-function getEditorPreviewLink() {
-  if (activePanel !== "blocks" || !editor.classList.contains("is-open")) {
-    return null;
-  }
-
-  const id = String(editorForm.elements.id.value || "").trim();
-  const col = Number.parseInt(colSelect.value, 10);
-  const row = Number.parseInt(rowSelect.value, 10);
-
-  if (!Number.isInteger(col) || !Number.isInteger(row)) {
-    return null;
-  }
-
-  return normalizeLink({
-    id: id || "preview-link",
-    title: String(editorForm.elements.title.value || "").trim() || "New block",
-    url: String(editorForm.elements.url.value || "").trim() || "https://example.com",
-    color: String(editorForm.elements.color.value || "").trim() || "#4f46e5",
-    col,
-    row,
-    showTitle: Boolean(editorForm.elements.showTitle.checked),
-    showIcon: Boolean(editorForm.elements.showIcon.checked)
-  });
-}
-
-function createCell(row, col, content) {
-  const cell = document.createElement("div");
-
-  cell.className = "cell";
-  cell.dataset.row = String(row);
-  cell.dataset.col = String(col);
-  cell.style.gridColumn = String(col);
-  cell.style.gridRow = String(row);
-
-  if (highlightedEditorCell?.row === row && highlightedEditorCell?.col === col) {
-    cell.classList.add("cell--editor-target");
-  }
-
-  cell.appendChild(content);
-
-  return cell;
-}
-
-function renderBlocks() {
-  const fragment = document.createDocumentFragment();
-  const shouldShowEmptyCells = isEditing || settings.showGridAlways;
-  const previewLink = getEditorPreviewLink();
-
-  blocksContainer.replaceChildren();
-  updateGridDimensions();
-
-  if (!shouldShowEmptyCells) {
-    for (const link of links) {
-      const cellLink = previewLink && previewLink.row === link.row && previewLink.col === link.col && previewLink.id === link.id
-        ? previewLink
-        : link;
-      fragment.appendChild(createCell(link.row, link.col, createBlockNode(cellLink)));
-    }
-  } else {
-    for (let row = 1; row <= gridRows; row += 1) {
-      for (let col = 1; col <= gridColumns; col += 1) {
-        const link = getLinkAtPosition(row, col);
-        const shouldRenderPreview = previewLink
-          && previewLink.row === row
-          && previewLink.col === col
-          && (!link || link.id === previewLink.id);
-
-        if (shouldRenderPreview && previewLink) {
-          fragment.appendChild(createCell(row, col, createBlockNode(previewLink)));
-        } else if (link) {
-          fragment.appendChild(createCell(row, col, createBlockNode(link)));
-        } else if (isEditing) {
-          fragment.appendChild(createCell(row, col, createAddBlockNode({ row, col })));
-        } else {
-          fragment.appendChild(createCell(row, col, createEmptyCellNode()));
-        }
-      }
-    }
-  }
-
-  blocksContainer.appendChild(fragment);
-}
-
-function setHighlightedDropCell(cell) {
-  if (highlightedDropCell === cell) {
-    return;
-  }
-
-  if (highlightedDropCell) {
-    highlightedDropCell.classList.remove("cell--drop-target");
-  }
-
-  highlightedDropCell = cell;
-
-  if (highlightedDropCell) {
-    highlightedDropCell.classList.add("cell--drop-target");
-  }
-}
-
-function getDraggedLink() {
-  if (!draggedLinkId) {
-    return null;
-  }
-
-  return links.find((link) => link.id === draggedLinkId) || null;
-}
-
-function getCellFromEventTarget(target) {
-  return target instanceof Element ? target.closest(".cell") : null;
-}
-
-function isValidDropCell(cell) {
-  const draggedLink = getDraggedLink();
-
-  if (!isEditing || !draggedLink || !cell) {
-    return false;
-  }
-
-  const row = Number.parseInt(cell.dataset.row || "", 10);
-  const col = Number.parseInt(cell.dataset.col || "", 10);
-
-  if (!Number.isInteger(row) || !Number.isInteger(col)) {
-    return false;
-  }
-
-  return draggedLink.row !== row || draggedLink.col !== col;
-}
-
-async function moveDraggedLinkToCell(cell) {
-  const draggedLink = getDraggedLink();
-
-  if (!draggedLink || !isValidDropCell(cell)) {
-    return;
-  }
-
-  const nextRow = Number.parseInt(cell.dataset.row || "", 10);
-  const nextCol = Number.parseInt(cell.dataset.col || "", 10);
-  const previousRow = draggedLink.row;
-  const previousCol = draggedLink.col;
-  const targetLink = getLinkAtPosition(nextRow, nextCol);
-
-  links = links.map((link) => {
-    if (link.id === draggedLink.id) {
-      return { ...link, row: nextRow, col: nextCol };
-    }
-
-    if (targetLink && link.id === targetLink.id) {
-      return { ...link, row: previousRow, col: previousCol };
-    }
-
-    return link;
-  });
-
-  await saveLinks(links);
-  renderBlocks();
-}
-
-function handlePositionChange() {
-  const id = String(editorForm.elements.id.value || "").trim();
-  const col = Number.parseInt(colSelect.value, 10);
-  const row = Number.parseInt(rowSelect.value, 10);
-
-  editorError.textContent = isCellTaken(row, col, id) ? "That cell is already occupied." : "";
-  setHighlightedEditorCell({ row, col });
-  renderBlocks();
-}
-
-function handleBlockPreviewChange() {
-  if (activePanel !== "blocks" || !editor.classList.contains("is-open")) {
-    return;
-  }
-
-  renderBlocks();
-}
-
-async function handleSubmit(event) {
-  event.preventDefault();
-  editorError.textContent = "";
-
-  const formData = new FormData(editorForm);
-  const id = String(formData.get("id") || "").trim();
-  const title = String(formData.get("title") || "").trim();
-  const rawUrl = String(formData.get("url") || "").trim();
-  const color = String(formData.get("color") || "").trim();
-  const col = Number.parseInt(String(formData.get("col") || ""), 10);
-  const row = Number.parseInt(String(formData.get("row") || ""), 10);
-  const showTitle = formData.get("showTitle") === "on";
-  const showIcon = formData.get("showIcon") === "on";
-
-  let url = rawUrl;
-
-  if (!/^https?:\/\//i.test(url)) {
-    url = `https://${url}`;
-  }
-
-  try {
-    new URL(url);
-  } catch {
-    editorError.textContent = "Enter a valid URL.";
-    return;
-  }
-
-  if (isCellTaken(row, col, id)) {
-    editorError.textContent = "That cell is already occupied.";
-    return;
-  }
-
-  const nextLink = normalizeLink({ id, title, url, color, col, row, showTitle, showIcon });
-
-  if (id) {
-    links = links.map((link) => (link.id === id ? nextLink : link));
-  } else {
-    links = [...links, nextLink];
-  }
-
-  await saveLinks(links);
-  closeEditor();
-  renderBlocks();
-}
-
-async function handleSettingsSubmit(event) {
-  event.preventDefault();
-  settingsMessage.textContent = "";
-
-  const backgroundColor = String(settingsForm.elements.backgroundColor.value || "").trim() || defaultSettings.backgroundColor;
-  const imageUrl = String(settingsForm.elements.backgroundImage.value || "").trim();
-  const showGridAlways = Boolean(settingsForm.elements.showGridAlways.checked);
-  const selectedFile = backgroundImageFileInput.files?.[0] || null;
-  let backgroundImage = imageUrl;
-
-  if (selectedFile) {
-    try {
-      backgroundImage = await readFileAsDataUrl(selectedFile);
-    } catch {
-      settingsMessage.textContent = "Couldn't load that image.";
-      return;
-    }
-  } else if (imageUrl) {
-    try {
-      const parsedUrl = new URL(imageUrl);
-
-      if (!["http:", "https:", "data:"].includes(parsedUrl.protocol)) {
-        throw new Error("Invalid protocol");
-      }
-
-      backgroundImage = parsedUrl.toString();
-    } catch {
-      settingsMessage.textContent = "Enter a valid image URL.";
-      return;
-    }
-  }
-
-  settings = normalizeSettings({ backgroundColor, backgroundImage, showGridAlways });
-  previewBackgroundImage = "";
-  await saveSettings(settings);
-  applySettings();
-  renderBlocks();
-  backgroundImageUrlInput.value = settings.backgroundImage;
-  backgroundImageFileInput.value = "";
-  settingsMessage.textContent = "Background saved.";
-}
-
-async function handleClearImage() {
-  settings = normalizeSettings({ ...settings, backgroundImage: "" });
-  previewBackgroundImage = "";
-  await saveSettings(settings);
-  applySettings();
-  renderBlocks();
-  backgroundImageUrlInput.value = "";
-  backgroundImageFileInput.value = "";
-  settingsMessage.textContent = "Image removed.";
-}
-
-function handleExportConfig() {
-  const payload = buildExportPayload(links, settings);
-  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-
-  downloadTextFile(
-    `new-tab-blocks-config-${timestamp}.json`,
-    JSON.stringify(payload, null, 2),
-    "application/json"
+function syncThemeToggle(theme) {
+  const dark = theme === "dark";
+  getElement("theme-toggle").setAttribute("aria-pressed", String(dark));
+  getElement("theme-toggle").setAttribute(
+    "aria-label",
+    dark ? "Activar modo claro" : "Activar modo oscuro",
   );
-  settingsMessage.textContent = "Configuration exported.";
+  getElement("theme-toggle").title = dark
+    ? "Modo oscuro · cambiar a claro"
+    : "Modo claro · cambiar a oscuro";
 }
-
-async function handleImportConfigFile(event) {
-  const file = event.target.files?.[0] || null;
-
-  if (!file) {
+function showImageName(settings) {
+  const label = getElement("background-image-name");
+  getElement("background-image-info").hidden = !settings.backgroundImage;
+  if (!settings.backgroundImage) {
+    label.textContent = "";
     return;
   }
-
-  settingsMessage.textContent = "";
-
-  try {
-    const rawValue = await file.text();
-    const importedConfig = parseImportedConfig(rawValue);
-
-    links = importedConfig.links;
-    settings = importedConfig.settings;
-    previewBackgroundImage = "";
-
-    await saveLinks(links);
-    await saveSettings(settings);
-
-    applySettings();
-    updateGridDimensions();
-    renderBlocks();
-
-    backgroundColorInput.value = settings.backgroundColor;
-    backgroundImageUrlInput.value = settings.backgroundImage;
-    settingsForm.elements.showGridAlways.checked = settings.showGridAlways;
-    backgroundImageFileInput.value = "";
-    settingsMessage.textContent = "Configuration imported.";
-  } catch (error) {
-    settingsMessage.textContent = error instanceof Error
-      ? error.message
-      : "The configuration could not be imported.";
-  } finally {
-    configImportFileInput.value = "";
+  let name =
+    settings.backgroundImageName ||
+    "Imagen local guardada (nombre no disponible)";
+  if (!settings.backgroundImage.startsWith("data:")) {
+    const imageUrl = new URL(settings.backgroundImage);
+    name =
+      imageUrl.pathname.split("/").filter(Boolean).pop() || imageUrl.hostname;
+    try {
+      name = decodeURIComponent(name);
+    } catch {
+      /* Conserva el nombre si contiene escapes inválidos. */
+    }
   }
+  label.textContent = `Imagen de fondo: ${name}`;
+}
+function createTile(block, settings, col, row) {
+  const tile = document.createElement("a");
+  tile.className = "tile";
+  tile.href = block.url;
+  tile.dataset.id = block.id;
+  tile.draggable = editing;
+  tile.setAttribute(
+    "aria-label",
+    editing
+      ? `Editar ${block.title}, columna ${col}, fila ${row}`
+      : block.title,
+  );
+  tile.style.background = block.color;
+  tile.style.color = textColor(block.color);
+  if (block.showIcon) {
+    const img = document.createElement("img");
+    img.alt = "";
+    img.referrerPolicy = "no-referrer";
+    const domain = encodeURIComponent(new URL(block.url).hostname);
+    img.src = settings.favicons
+      ? `https://www.google.com/s2/favicons?domain=${domain}&sz=64`
+      : "fallback.svg";
+    img.addEventListener("error", () => {
+      if (!img.src.endsWith("/fallback.svg")) img.src = "fallback.svg";
+    });
+    tile.append(img);
+  }
+  if (block.showTitle) {
+    const span = document.createElement("span");
+    span.textContent = block.title;
+    tile.append(span);
+  }
+  return tile;
 }
 
-function updateBackgroundPreview() {
-  const previewSettings = normalizeSettings({
-    ...settings,
-    backgroundColor: String(backgroundColorInput.value || "").trim() || settings.backgroundColor,
-    backgroundImage: settings.backgroundImage
+function createDeleteButton(block, cell) {
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "tile-delete";
+  remove.style.color = textColor(block.color);
+  remove.textContent = "×";
+  remove.title = `Eliminar ${block.title}`;
+  remove.setAttribute("aria-label", `Eliminar bloque ${block.title}`);
+  remove.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    runGuarded(async () => {
+      remove.disabled = true;
+      try {
+        const next = structuredClone(current.config);
+        next.links = next.links.filter((link) => link.id !== block.id);
+        await persistConfig(next);
+        announce("Bloque eliminado.");
+        cell.querySelector(".add")?.focus();
+      } finally {
+        if (remove.isConnected) remove.disabled = false;
+      }
+    });
   });
-
-  const imageUrl = String(backgroundImageUrlInput.value || "").trim();
-  const previewImage = previewBackgroundImage || imageUrl || "";
-
-  applySettings(previewSettings, previewImage);
-  renderBlocks();
+  return remove;
 }
 
-async function handleBackgroundFilePreview() {
-  const selectedFile = backgroundImageFileInput.files?.[0] || null;
-
-  if (!selectedFile) {
-    previewBackgroundImage = "";
-    updateBackgroundPreview();
+function renderConfig(config = current.config) {
+  showImageName(config.settings);
+  const settings = config.settings;
+  document.documentElement.dataset.theme = settings.theme || "light";
+  syncThemeToggle(settings.theme);
+  document.body.style.backgroundColor =
+    settings.theme === "dark" && settings.backgroundColor === "#eef1f4"
+      ? "#121212"
+      : settings.backgroundColor;
+  document.body.style.backgroundImage = settings.backgroundImage
+    ? `url(${JSON.stringify(settings.backgroundImage)})`
+    : "";
+  grid.style.setProperty("--columns", settings.columns);
+  grid.style.setProperty("--tile-size", `${settings.tileSize}px`);
+  grid.classList.toggle("editing", editing);
+  const occupied = new Map(
+      config.links.map((block) => [`${block.col}:${block.row}`, block]),
+    ),
+    keys = new Set();
+  for (let row = 1; row <= settings.rows; row++)
+    for (let col = 1; col <= settings.columns; col++) {
+      const key = `${col}:${row}`;
+      keys.add(key);
+      let cell = cells.get(key);
+      if (!cell) {
+        cell = document.createElement("div");
+        cell.className = "cell";
+        cell.dataset.col = col;
+        cell.dataset.row = row;
+        cells.set(key, cell);
+        grid.append(cell);
+      }
+      cell.style.gridColumn = col;
+      cell.style.gridRow = row;
+      const block = occupied.get(key),
+        signature = JSON.stringify([
+          block,
+          editing,
+          settings.showGridAlways,
+          settings.favicons,
+        ]);
+      if (cell.dataset.signature === signature) continue;
+      cell.dataset.signature = signature;
+      cell.replaceChildren();
+      cell.className = "cell";
+      if (block) {
+        cell.append(createTile(block, settings, col, row));
+        if (editing) {
+          cell.append(createDeleteButton(block, cell));
+        }
+      } else if (editing) {
+        cell.classList.add("empty");
+        const button = document.createElement("button");
+        button.className = "add";
+        button.textContent = "+";
+        button.setAttribute(
+          "aria-label",
+          `Añadir bloque, columna ${col}, fila ${row}`,
+        );
+        cell.append(button);
+      }
+    }
+  for (const [key, cell] of cells)
+    if (!keys.has(key)) {
+      cell.remove();
+      cells.delete(key);
+    }
+}
+function closeEditor() {
+  if (busy) return;
+  imageToken++;
+  imagePending = false;
+  getElement("save").disabled = false;
+  dialog.close();
+  getElement("options").setAttribute("aria-expanded", "false");
+  draft = null;
+  renderConfig();
+  const replacement = openerId
+    ? grid.querySelector(`[data-id="${openerId}"]`)
+    : openerPosition
+      ? cells
+          .get(`${openerPosition.col}:${openerPosition.row}`)
+          ?.querySelector("button")
+      : null;
+  (opener?.isConnected
+    ? opener
+    : replacement || getElement("menu-toggle")
+  ).focus();
+}
+function openEditor(kind, block = null, col = 1, row = 1) {
+  opener = document.activeElement;
+  openerId = opener?.dataset.id || "";
+  openerPosition = opener?.closest(".cell")?.dataset;
+  draft = structuredClone(current.config);
+  mode = kind;
+  activeId = block?.id || crypto.randomUUID();
+  imported = false;
+  form.reset();
+  getElement("error").textContent = "";
+  getElement("conflict").hidden = true;
+  getElement("import-summary").hidden = true;
+  getElement("block-fields").hidden = kind !== "block";
+  getElement("settings-fields").hidden = kind !== "settings";
+  getElement("import").hidden = kind !== "settings";
+  getElement("delete").hidden = !block;
+  getElement("panel-title").textContent =
+    kind === "settings" ? "Opciones" : block ? "Editar bloque" : "Nuevo bloque";
+  if (kind === "block") {
+    const blockValues = block || {
+      title: "",
+      url: "",
+      color: "#426b60",
+      col,
+      row,
+      showTitle: true,
+      showIcon: true,
+    };
+    for (const fieldName of ["title", "url", "color", "col", "row"])
+      fields[fieldName].value = blockValues[fieldName];
+    for (const fieldName of ["showTitle", "showIcon"])
+      fields[fieldName].checked = blockValues[fieldName];
+  } else fillSettingsForm();
+  dialog.showModal();
+  getElement("options").setAttribute(
+    "aria-expanded",
+    String(kind === "settings"),
+  );
+  (kind === "block" ? fields.title : fields.columns).focus();
+}
+function fillSettingsForm() {
+  const settings = draft.settings;
+  for (const fieldName of ["columns", "rows", "tileSize", "backgroundColor"])
+    fields[fieldName].value = settings[fieldName];
+  fields.theme.value = settings.theme || "light";
+  syncThemeToggle(fields.theme.value);
+  getElement("theme-toggle").disabled = false;
+  fields.backgroundImage.value = settings.backgroundImage.startsWith("data:")
+    ? ""
+    : settings.backgroundImage;
+  fields.favicons.checked = settings.favicons;
+  getElement("image").value = "";
+  showImageName(settings);
+}
+function collectDraft() {
+  if (imported) return validate(draft);
+  let next = structuredClone(draft);
+  if (mode === "settings") {
+    next.settings = {
+      ...next.settings,
+      theme: fields.theme.value,
+      columns: Number(fields.columns.value),
+      rows: Number(fields.rows.value),
+      tileSize: Number(fields.tileSize.value),
+      backgroundColor: fields.backgroundColor.value,
+      showGridAlways: false,
+      favicons: fields.favicons.checked,
+      backgroundImage:
+        fields.backgroundImage.value.trim() ||
+        (next.settings.backgroundImage.startsWith("data:")
+          ? next.settings.backgroundImage
+          : ""),
+    };
+  } else {
+    const col = Number(fields.col.value),
+      row = Number(fields.row.value),
+      old = next.links.find((block) => block.id === activeId);
+    if (old) next = move(next, activeId, col, row);
+    else if (next.links.some((block) => block.col === col && block.row === row))
+      throw new Error(
+        "Esta celda está ocupada. Elige otra para el nuevo bloque.",
+      );
+    const block = {
+      id: activeId,
+      title: fields.title.value,
+      url: fields.url.value,
+      color: fields.color.value,
+      col,
+      row,
+      showTitle: fields.showTitle.checked,
+      showIcon: fields.showIcon.checked,
+    };
+    next.links = next.links.filter((block) => block.id !== activeId);
+    next.links.push(block);
+  }
+  return validate(next);
+}
+async function persistConfig(config) {
+  if (loadFailed)
+    throw new Error(
+      "No se pudo leer el almacenamiento. Recarga la página antes de guardar para proteger los datos existentes.",
+    );
+  current = await store.save(config, current.revision);
+  renderConfig();
+  announce("Cambios guardados.");
+}
+async function runGuarded(task) {
+  if (busy) return;
+  if (imagePending) {
+    showError(new Error("Espera a que termine de procesarse la imagen."));
     return;
   }
-
+  busy = true;
+  for (const button of dialog.querySelectorAll("button"))
+    button.disabled = true;
+  form.inert = true;
   try {
-    previewBackgroundImage = await readFileAsDataUrl(selectedFile);
-    updateBackgroundPreview();
-  } catch {
-    settingsMessage.textContent = "Couldn't load that image.";
+    await task();
+  } catch (e) {
+    showError(e);
+    announce(e.message);
+  } finally {
+    busy = false;
+    form.inert = false;
+    for (const button of dialog.querySelectorAll("button"))
+      button.disabled = false;
   }
 }
-
-async function initialize() {
-  const storedLinks = await readStoredLinks();
-  const storedSettings = await readStoredSettings();
-  const initialLinks = Array.isArray(storedLinks) ? storedLinks : defaultLinks;
-
-  links = initialLinks.map(normalizeLink);
-  settings = normalizeSettings(storedSettings);
-  applySettings();
-  updateGridDimensions();
-
-  if (!Array.isArray(storedLinks)) {
-    await saveLinks(links);
-  }
-
-  if (!storedSettings || typeof storedSettings !== "object") {
-    await saveSettings(settings);
-  }
-
-  renderBlocks();
+let menuCloseTimer;
+function setMenu(open, restoreFocus = false) {
+  clearTimeout(menuCloseTimer);
+  if (restoreFocus) getElement("menu-toggle").focus();
+  getElement("menu-panel").hidden = !open;
+  getElement("menu-toggle").setAttribute("aria-expanded", String(open));
+  getElement("menu-toggle").setAttribute(
+    "aria-label",
+    open ? "Cerrar menú de personalización" : "Abrir menú de personalización",
+  );
 }
-
-editToggle.addEventListener("click", () => {
-  setMenuOpen(false);
-  setEditing(!isEditing);
-  renderBlocks();
+getElement("page-menu").addEventListener("pointerenter", (e) => {
+  if (e.pointerType === "mouse") setMenu(true);
 });
-
-optionsToggle.addEventListener("click", openSettings);
-editorClose.addEventListener("click", closeEditor);
-editorCancel.addEventListener("click", closeEditor);
-editorForm.addEventListener("submit", handleSubmit);
-settingsForm.addEventListener("submit", handleSettingsSubmit);
-clearImageButton.addEventListener("click", handleClearImage);
-exportConfigButton.addEventListener("click", handleExportConfig);
-importConfigButton.addEventListener("click", () => configImportFileInput.click());
-configImportFileInput.addEventListener("change", handleImportConfigFile);
-colSelect.addEventListener("change", handlePositionChange);
-rowSelect.addEventListener("change", handlePositionChange);
-editorForm.elements.title.addEventListener("input", handleBlockPreviewChange);
-editorForm.elements.url.addEventListener("input", handleBlockPreviewChange);
-editorForm.elements.color.addEventListener("input", handleBlockPreviewChange);
-editorForm.elements.showTitle.addEventListener("change", handleBlockPreviewChange);
-editorForm.elements.showIcon.addEventListener("change", handleBlockPreviewChange);
-backgroundColorInput.addEventListener("input", updateBackgroundPreview);
-backgroundImageUrlInput.addEventListener("input", () => {
-  previewBackgroundImage = "";
-  updateBackgroundPreview();
-});
-backgroundImageFileInput.addEventListener("change", handleBackgroundFilePreview);
-window.addEventListener("resize", renderBlocks);
-blocksContainer.addEventListener("dragover", (event) => {
-  const cell = getCellFromEventTarget(event.target);
-
-  if (!isValidDropCell(cell)) {
-    setHighlightedDropCell(null);
-    return;
-  }
-
-  event.preventDefault();
-  if (event.dataTransfer) {
-    event.dataTransfer.dropEffect = "move";
-  }
-  setHighlightedDropCell(cell);
-});
-blocksContainer.addEventListener("drop", async (event) => {
-  const cell = getCellFromEventTarget(event.target);
-
-  if (!isValidDropCell(cell)) {
-    clearDragState();
-    return;
-  }
-
-  event.preventDefault();
-  await moveDraggedLinkToCell(cell);
-  clearDragState();
-});
-blocksContainer.addEventListener("dragleave", (event) => {
-  if (event.currentTarget instanceof Element && event.currentTarget.contains(event.relatedTarget)) {
-    return;
-  }
-
-  setHighlightedDropCell(null);
-});
-document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") {
-    setMenuOpen(false);
+getElement("page-menu").addEventListener("pointerleave", (e) => {
+  if (
+    e.pointerType === "mouse" &&
+    !getElement("page-menu").contains(document.activeElement)
+  ) {
+    menuCloseTimer = setTimeout(() => {
+      if (
+        !getElement("page-menu").matches(":hover") &&
+        !getElement("page-menu").contains(document.activeElement)
+      )
+        setMenu(false);
+    }, 200);
   }
 });
-
-initialize();
+getElement("menu-toggle").addEventListener("focus", () => setMenu(true));
+// En pantallas táctiles no existe hover; el toque conserva el acceso al menú.
+getElement("menu-toggle").onclick = (e) => {
+  if (e.detail === 0 || matchMedia("(hover: none)").matches) setMenu(true);
+};
+getElement("theme-toggle").onclick = () => {
+  if (imported) return;
+  fields.theme.value = fields.theme.value === "dark" ? "light" : "dark";
+  syncThemeToggle(fields.theme.value);
+  form.dispatchEvent(new Event("input", { bubbles: true }));
+};
+getElement("page-menu").addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !getElement("menu-panel").hidden) {
+    e.preventDefault();
+    setMenu(false, true);
+  }
+  if (e.target === getElement("menu-toggle") && e.key === "ArrowUp") {
+    e.preventDefault();
+    setMenu(true);
+    getElement("edit").focus();
+  }
+});
+document.addEventListener("pointerdown", (e) => {
+  if (!getElement("page-menu").contains(e.target)) setMenu(false);
+});
+getElement("page-menu").addEventListener("focusout", (e) => {
+  if (!getElement("page-menu").contains(e.relatedTarget)) setMenu(false);
+});
+getElement("edit").onclick = () => {
+  editing = !editing;
+  getElement("edit").setAttribute("aria-pressed", String(editing));
+  getElement("edit").textContent = editing
+    ? "Terminar edición"
+    : "Editar bloques";
+  getElement("menu-toggle").classList.toggle("is-editing", editing);
+  getElement("menu-toggle").title = editing
+    ? "Personalizar · edición activa"
+    : "Personalizar";
+  setMenu(false, true);
+  renderConfig();
+};
+getElement("options").onclick = () => {
+  setMenu(false, true);
+  openEditor("settings");
+};
+getElement("close").onclick = closeEditor;
+getElement("cancel").onclick = closeEditor;
+dialog.addEventListener("cancel", (e) => {
+  e.preventDefault();
+  closeEditor();
+});
+form.addEventListener("input", () => {
+  if (imported) return;
+  try {
+    renderConfig(collectDraft());
+    getElement("error").textContent = "";
+  } catch (e) {
+    showError(e);
+  }
+});
+form.addEventListener("submit", (e) => {
+  e.preventDefault();
+  runGuarded(async () => {
+    await persistConfig(collectDraft());
+    busy = false;
+    closeEditor();
+  });
+});
+getElement("delete").onclick = () =>
+  runGuarded(async () => {
+    const next = structuredClone(draft);
+    next.links = next.links.filter((block) => block.id !== activeId);
+    await persistConfig(next);
+    busy = false;
+    closeEditor();
+  });
+grid.addEventListener("click", (e) => {
+  const cell = e.target.closest(".cell");
+  if (!cell || !editing) return;
+  e.preventDefault();
+  const id = e.target.closest("[data-id]")?.dataset.id;
+  openEditor(
+    "block",
+    current.config.links.find((block) => block.id === id),
+    Number(cell.dataset.col),
+    Number(cell.dataset.row),
+  );
+});
+async function relocateBlock(id, col, row) {
+  if (busy) return;
+  busy = true;
+  try {
+    await persistConfig(move(current.config, id, col, row));
+    grid.querySelector(`[data-id="${id}"]`)?.focus();
+  } catch (e) {
+    announce(e.message);
+  } finally {
+    busy = false;
+  }
+}
+function movementDelta(e) {
+  if (!e.altKey) return null;
+  return {
+    ArrowLeft: [-1, 0],
+    ArrowRight: [1, 0],
+    ArrowUp: [0, -1],
+    ArrowDown: [0, 1],
+  }[e.key];
+}
+dialog.addEventListener("keydown", (e) => {
+  if (mode !== "block" || busy) return;
+  const delta = movementDelta(e);
+  if (!delta) return;
+  e.preventDefault();
+  const col = Number(fields.col.value) + delta[0];
+  const row = Number(fields.row.value) + delta[1];
+  if (
+    !Number.isInteger(col) || !Number.isInteger(row) ||
+    col < 1 || col > draft.settings.columns ||
+    row < 1 || row > draft.settings.rows
+  ) return;
+  fields.col.value = col;
+  fields.row.value = row;
+  fields.col.dispatchEvent(new Event("input", { bubbles: true }));
+});
+grid.addEventListener("keydown", (e) => {
+  const id = e.target.closest("[data-id]")?.dataset.id;
+  if (!editing || !id || !e.altKey) return;
+  const delta = movementDelta(e);
+  if (!delta) return;
+  e.preventDefault();
+  const block = current.config.links.find((block) => block.id === id);
+  relocateBlock(id, block.col + delta[0], block.row + delta[1]);
+});
+grid.addEventListener("dragstart", (e) => {
+  if (!editing) return;
+  dragId = e.target.closest("[data-id]")?.dataset.id || "";
+  if (dragId) e.dataTransfer.setData("text/plain", dragId);
+});
+grid.addEventListener("dragover", (e) => {
+  if (dragId && e.target.closest(".cell")) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+  }
+});
+grid.addEventListener("drop", (e) => {
+  e.preventDefault();
+  const cell = e.target.closest(".cell");
+  if (dragId && cell)
+    relocateBlock(dragId, Number(cell.dataset.col), Number(cell.dataset.row));
+  dragId = "";
+});
+grid.addEventListener("dragend", () => {
+  dragId = "";
+});
+getElement("image").onchange = async () => {
+  const token = ++imageToken;
+  const file = getElement("image").files[0];
+  if (!file) return;
+  imagePending = true;
+  getElement("save").disabled = true;
+  try {
+    const data = await compressImage(file);
+    if (token !== imageToken || !draft) return;
+    draft.settings.backgroundImage = data;
+    draft.settings.backgroundImageName = file.name.slice(0, 255);
+    fields.backgroundImage.value = "";
+    renderConfig(collectDraft());
+    getElement("error").textContent = "";
+  } catch (e) {
+    if (token === imageToken) showError(e);
+  } finally {
+    if (token === imageToken) {
+      imagePending = false;
+      getElement("save").disabled = false;
+    }
+  }
+};
+getElement("clear-image").onclick = () => {
+  imageToken++;
+  imagePending = false;
+  draft.settings.backgroundImage = "";
+  draft.settings.backgroundImageName = "";
+  fields.backgroundImage.value = "";
+  getElement("image").value = "";
+  getElement("save").disabled = false;
+  try {
+    renderConfig(collectDraft());
+  } catch (e) {
+    showError(e);
+  }
+};
+getElement("export").onclick = () => {
+  try {
+    const data = draft ? collectDraft() : current.config;
+    const blob = new Blob([exportConfig(data)], { type: "application/json" }),
+      u = URL.createObjectURL(blob),
+      a = document.createElement("a");
+    a.href = u;
+    a.download = "new-tab-blocks.json";
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(u), 1000);
+    announce("Configuración exportada.");
+  } catch (e) {
+    showError(e);
+  }
+};
+getElement("import").onclick = () => getElement("import-file").click();
+getElement("import-file").onchange = async () => {
+  const file = getElement("import-file").files[0];
+  if (!file) return;
+  try {
+    if (file.size > LIMITS.jsonBytes)
+      throw new Error("El archivo supera los 3 MB.");
+    const next = parseImport(await file.text());
+    if (!draft || !dialog.open) return;
+    imageToken++;
+    imagePending = false;
+    getElement("save").disabled = false;
+    draft = next;
+    imported = true;
+    fillSettingsForm();
+    getElement("theme-toggle").disabled = true;
+    getElement("import-summary").hidden = false;
+    getElement("import-summary").textContent =
+      `Revisar importación: ${next.links.length} bloques; ` +
+      `${next.settings.columns} columnas × ${next.settings.rows} filas. ` +
+      "Guardar sustituirá toda la configuración.";
+    getElement("settings-fields")
+      .querySelectorAll("input:not([type=file]),select")
+      .forEach((input) => (input.disabled = true));
+    renderConfig(draft);
+    getElement("error").textContent = "";
+  } catch (e) {
+    showError(e);
+  } finally {
+    getElement("import-file").value = "";
+  }
+};
+dialog.addEventListener("close", () => {
+  getElement("settings-fields")
+    .querySelectorAll("input,select")
+    .forEach((input) => (input.disabled = false));
+});
+subscribe(async () => {
+  try {
+    const latest = await store.read();
+    if (latest.revision === current.revision) return;
+    if (draft) {
+      getElement("conflict").hidden = false;
+      announce("Otra pestaña ha guardado cambios. Tu borrador se conserva.");
+    } else {
+      current = latest;
+      renderConfig();
+      announce("Configuración actualizada desde otra pestaña.");
+    }
+  } catch (e) {
+    announce(e.message);
+  }
+});
+// Cancelar debe cargar también la última revisión que entró durante la edición.
+dialog.addEventListener("close", async () => {
+  try {
+    current = await store.read();
+    renderConfig();
+  } catch (e) {
+    announce(e.message);
+  }
+});
+try {
+  current = await store.read();
+} catch (e) {
+  loadFailed = true;
+  announce(
+    `No se pudo cargar la configuración: ${e.message} Los datos originales se conservan. Recarga para reintentar.`,
+  );
+}
+renderConfig();

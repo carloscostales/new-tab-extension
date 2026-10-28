@@ -1,95 +1,40 @@
-import { defaultSettings } from "./constants.js";
-
-export function createId() {
-  return crypto.randomUUID();
+﻿export function textColor(hex) {
+  const rgb = hex
+    .slice(1)
+    .match(/../g)
+    .map((component) => parseInt(component, 16) / 255)
+    .map((channel) =>
+      channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4,
+    );
+  return rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722 > 0.179
+    ? "#111111"
+    : "#ffffff";
 }
-
-export function getHostname(url) {
+export async function compressImage(file) {
+  if (
+    !["image/jpeg", "image/png", "image/webp"].includes(file.type) ||
+    file.size > 8_000_000
+  )
+    throw new Error("Elige PNG, JPEG o WebP de hasta 8 MB.");
+  const bitmap = await createImageBitmap(file);
   try {
-    return new URL(url).hostname;
-  } catch {
-    return "";
+    if (bitmap.width * bitmap.height > 40_000_000)
+      throw new Error("La imagen supera los 40 megapíxeles.");
+    const scale = Math.min(1, 1920 / Math.max(bitmap.width, bitmap.height));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    canvas
+      .getContext("2d")
+      .drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    for (const quality of [0.85, 0.65, 0.45, 0.25]) {
+      const data = canvas.toDataURL("image/webp", quality);
+      if (data.length <= 700_000) return data;
+    }
+    throw new Error(
+      "No se pudo reducir la imagen a 700 KB. Prueba otra imagen.",
+    );
+  } finally {
+    bitmap.close();
   }
-}
-
-export function normalizeLink(link) {
-  return {
-    id: link.id || createId(),
-    title: link.title || "Untitled",
-    url: link.url || "",
-    color: link.color || "#4b5563",
-    col: Number.parseInt(link.col, 10) || 1,
-    row: Number.parseInt(link.row, 10) || 1,
-    showTitle: typeof link.showTitle === "boolean" ? link.showTitle : true,
-    showIcon: typeof link.showIcon === "boolean" ? link.showIcon : true
-  };
-}
-
-export function normalizeSettings(value) {
-  const backgroundColor = typeof value?.backgroundColor === "string" && /^#[0-9a-f]{6}$/i.test(value.backgroundColor)
-    ? value.backgroundColor
-    : defaultSettings.backgroundColor;
-  const backgroundImage = typeof value?.backgroundImage === "string"
-    ? value.backgroundImage.trim()
-    : defaultSettings.backgroundImage;
-  const showGridAlways = typeof value?.showGridAlways === "boolean"
-    ? value.showGridAlways
-    : defaultSettings.showGridAlways;
-
-  return { backgroundColor, backgroundImage, showGridAlways };
-}
-
-function mixChannel(channelA, channelB, amount) {
-  return Math.round(channelA + (channelB - channelA) * amount);
-}
-
-function hexToRgb(color) {
-  const normalized = color.replace("#", "");
-  const red = Number.parseInt(normalized.slice(0, 2), 16);
-  const green = Number.parseInt(normalized.slice(2, 4), 16);
-  const blue = Number.parseInt(normalized.slice(4, 6), 16);
-
-  return { red, green, blue };
-}
-
-function rgbToHex(red, green, blue) {
-  return `#${[red, green, blue]
-    .map((value) => value.toString(16).padStart(2, "0"))
-    .join("")}`;
-}
-
-export function getDerivedEmptyColor(backgroundColor) {
-  const { red, green, blue } = hexToRgb(backgroundColor);
-  const brightness = (red * 299 + green * 587 + blue * 114) / 1000;
-  const target = brightness > 160 ? 210 : 255;
-  const amount = brightness > 160 ? 0.14 : 0.18;
-
-  return rgbToHex(
-    mixChannel(red, target, amount),
-    mixChannel(green, target, amount),
-    mixChannel(blue, target, amount)
-  );
-}
-
-export function getTextColor(backgroundColor) {
-  const color = backgroundColor.replace("#", "");
-  const normalized = color.length === 3
-    ? color.split("").map((value) => `${value}${value}`).join("")
-    : color;
-  const red = Number.parseInt(normalized.slice(0, 2), 16);
-  const green = Number.parseInt(normalized.slice(2, 4), 16);
-  const blue = Number.parseInt(normalized.slice(4, 6), 16);
-  const brightness = (red * 299 + green * 587 + blue * 114) / 1000;
-
-  return brightness > 160 ? "#111827" : "#ffffff";
-}
-
-export function readFileAsDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-
-    reader.addEventListener("load", () => resolve(String(reader.result || "")));
-    reader.addEventListener("error", () => reject(new Error("Unable to read the selected image.")));
-    reader.readAsDataURL(file);
-  });
 }

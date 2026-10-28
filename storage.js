@@ -1,205 +1,61 @@
-import {
-  CONFIG_EXPORT_VERSION,
-  FALLBACK_SETTINGS_KEY,
-  FALLBACK_STORAGE_KEY,
-  SETTINGS_STORAGE_KEY,
-  STORAGE_KEY
-} from "./constants.js";
-import { normalizeLink, normalizeSettings } from "./utils.js";
-
-function readFallbackLinks() {
-  try {
-    const rawValue = localStorage.getItem(FALLBACK_STORAGE_KEY);
-
-    if (!rawValue) {
-      return null;
-    }
-
-    const parsedValue = JSON.parse(rawValue);
-    return Array.isArray(parsedValue) ? parsedValue : null;
-  } catch {
-    return null;
+﻿import { STORAGE_KEY, defaults } from "./constants.js";
+import { validate } from "./model.js";
+export class ConflictError extends Error {
+  constructor() {
+    super(
+      "Otra pestaña ha guardado cambios. Cancela para cargar su versión o exporta tu borrador antes de continuar.",
+    );
   }
 }
-
-function writeFallbackLinks(nextLinks) {
-  try {
-    localStorage.setItem(FALLBACK_STORAGE_KEY, JSON.stringify(nextLinks));
-  } catch {
-    // Ignore fallback storage failures.
-  }
-}
-
-function readFallbackSettings() {
-  try {
-    const rawValue = localStorage.getItem(FALLBACK_SETTINGS_KEY);
-
-    if (!rawValue) {
-      return null;
-    }
-
-    const parsedValue = JSON.parse(rawValue);
-    return parsedValue && typeof parsedValue === "object" ? parsedValue : null;
-  } catch {
-    return null;
-  }
-}
-
-function writeFallbackSettings(nextSettings) {
-  try {
-    localStorage.setItem(FALLBACK_SETTINGS_KEY, JSON.stringify(nextSettings));
-  } catch {
-    // Ignore fallback storage failures.
-  }
-}
-
-export function readStoredLinks() {
-  return new Promise((resolve) => {
-    if (!chrome?.storage?.local) {
-      resolve(readFallbackLinks());
-      return;
-    }
-
-    chrome.storage.local.get([STORAGE_KEY], (result) => {
-      if (chrome.runtime.lastError) {
-        resolve(readFallbackLinks());
-        return;
-      }
-
-      const storedLinks = Array.isArray(result[STORAGE_KEY]) ? result[STORAGE_KEY] : null;
-      resolve(storedLinks ?? readFallbackLinks());
-    });
-  });
-}
-
-export function readStoredSettings() {
-  return new Promise((resolve) => {
-    if (!chrome?.storage?.local) {
-      resolve(readFallbackSettings());
-      return;
-    }
-
-    chrome.storage.local.get([SETTINGS_STORAGE_KEY], (result) => {
-      if (chrome.runtime.lastError) {
-        resolve(readFallbackSettings());
-        return;
-      }
-
-      const storedSettings = result[SETTINGS_STORAGE_KEY];
-      resolve(storedSettings ?? readFallbackSettings());
-    });
-  });
-}
-
-export function saveLinks(nextLinks) {
-  return new Promise((resolve) => {
-    writeFallbackLinks(nextLinks);
-
-    if (!chrome?.storage?.local) {
-      resolve();
-      return;
-    }
-
-    chrome.storage.local.set({ [STORAGE_KEY]: nextLinks }, () => {
-      if (chrome.runtime.lastError) {
-        console.warn("Failed to save links to chrome.storage.local:", chrome.runtime.lastError.message);
-      }
-
-      resolve();
-    });
-  });
-}
-
-export function saveSettings(nextSettings) {
-  return new Promise((resolve) => {
-    writeFallbackSettings(nextSettings);
-
-    if (!chrome?.storage?.local) {
-      resolve();
-      return;
-    }
-
-    chrome.storage.local.set({ [SETTINGS_STORAGE_KEY]: nextSettings }, () => {
-      if (chrome.runtime.lastError) {
-        console.warn("Failed to save settings to chrome.storage.local:", chrome.runtime.lastError.message);
-      }
-
-      resolve();
-    });
-  });
-}
-
-export function buildExportPayload(links, settings) {
+export function createStore(
+  adapter,
+  lock = (task) => navigator.locks.request(STORAGE_KEY, task),
+) {
   return {
-    version: CONFIG_EXPORT_VERSION,
-    exportedAt: new Date().toISOString(),
-    links,
-    settings
+    async read() {
+      const raw = await adapter.get();
+      if (raw == null) return { revision: 0, config: defaults() };
+      if (!Number.isInteger(raw.revision) || raw.revision < 1)
+        throw new Error("Revisión almacenada inválida.");
+      return { revision: raw.revision, config: validate(raw.config) };
+    },
+    async save(config, revision) {
+      const clean = validate(config);
+      return lock(async () => {
+        const current = await this.read();
+        if (current.revision !== revision) throw new ConflictError();
+        const record = { revision: revision + 1, config: clean };
+        await adapter.set(record);
+        return record;
+      });
+    },
   };
 }
-
-function sanitizeImportedLinks(value) {
-  if (!Array.isArray(value)) {
-    throw new Error("The file does not include a valid links list.");
-  }
-
-  const seenPositions = new Set();
-
-  return value.map((item) => {
-    const nextLink = normalizeLink(item);
-    let normalizedUrl = String(nextLink.url || "").trim();
-
-    if (!normalizedUrl) {
-      throw new Error("One imported block is missing its URL.");
+const extension = !!globalThis.chrome?.storage?.local;
+const adapter = extension
+  ? {
+      get: async () =>
+        (await chrome.storage.local.get(STORAGE_KEY))[STORAGE_KEY],
+      set: async (value) => {
+        await chrome.storage.local.set({ [STORAGE_KEY]: value });
+      },
     }
-
-    if (!/^https?:\/\//i.test(normalizedUrl)) {
-      normalizedUrl = `https://${normalizedUrl}`;
-    }
-
-    try {
-      normalizedUrl = new URL(normalizedUrl).toString();
-    } catch {
-      throw new Error(`The block "${nextLink.title}" has an invalid URL.`);
-    }
-
-    if (nextLink.row < 1 || nextLink.col < 1) {
-      throw new Error(`The block "${nextLink.title}" has an invalid position.`);
-    }
-
-    const positionKey = `${nextLink.row}:${nextLink.col}`;
-
-    if (seenPositions.has(positionKey)) {
-      throw new Error("The imported file has multiple blocks in the same cell.");
-    }
-
-    seenPositions.add(positionKey);
-
-    return {
-      ...nextLink,
-      url: normalizedUrl
+  : {
+      get: async () => {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        return raw ? JSON.parse(raw) : null;
+      },
+      set: async (value) =>
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(value)),
     };
-  });
-}
-
-export function parseImportedConfig(rawValue) {
-  let parsedValue;
-
-  try {
-    parsedValue = JSON.parse(rawValue);
-  } catch {
-    throw new Error("The selected file is not valid JSON.");
-  }
-
-  if (!parsedValue || typeof parsedValue !== "object") {
-    throw new Error("The selected file does not contain a valid configuration.");
-  }
-
-  const importedLinks = sanitizeImportedLinks(parsedValue.links);
-  const importedSettings = normalizeSettings(parsedValue.settings);
-
-  return {
-    links: importedLinks,
-    settings: importedSettings
-  };
+export const store = createStore(adapter);
+export function subscribe(callback) {
+  if (extension)
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area === "local" && changes[STORAGE_KEY]) callback();
+    });
+  else
+    addEventListener("storage", (e) => {
+      if (e.key === STORAGE_KEY) callback();
+    });
 }
